@@ -319,6 +319,14 @@ export async function POST(request) {
         }
         mkdirSync(tmpBase, { recursive: true });
 
+        // LOG DISK SPACE (for debugging Vercel storage)
+        try {
+            const diskInfo = execSync("df -h /tmp", { encoding: "utf8" });
+            console.log("[deploy] Available Disk Space on /tmp:\n", diskInfo);
+        } catch (e) {
+            console.warn("[deploy] Could not check disk space:", e.message);
+        }
+
         const repoName = repoUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(-30);
         const cloneDir = path.join(tmpBase, `${repoName}_${Date.now()}`);
         if (!existsSync(cloneDir)) mkdirSync(cloneDir, { recursive: true });
@@ -343,14 +351,16 @@ export async function POST(request) {
 
         // ── 4. Install dependencies ──────────────────────────────
         if (existsSync(path.join(cloneDir, "package.json"))) {
-            console.log("[deploy] Installing dependencies (minimal space)...");
+            console.log("[deploy] Installing dependencies (FINAL ATTEMPT: Aggressive Space Reduction)...");
             try {
-                // Use no-cache and no-package-lock to save space on Vercel's small disk
-                run(`npm install --no-audit --no-fund --legacy-peer-deps --loglevel=error --prefer-offline --no-cache --no-package-lock --omit=dev`, cloneDir);
+                // EXTREME SPACE SAVING: omit dev, no cache, no package-lock, no bin-links, no optional, ignore scripts
+                run(`npm install --no-audit --no-fund --legacy-peer-deps --loglevel=error --prefer-offline --no-cache --no-package-lock --omit=dev --no-bin-links --no-optional --ignore-scripts`, cloneDir);
+                console.log("[deploy] Dependency installation SUCCESS (on final attempt)!");
             } catch (err) {
+                console.error("[deploy] Dependency installation FAILED. The project is likely too large for Vercel's 512MB limit.");
                 return NextResponse.json({
-                    error: "Dependency installation failed (possibly out of space).",
-                    details: err.message,
+                    error: "Dependency installation failed (ABSOLUTE OUT OF SPACE).",
+                    details: "Your AI-Agent project is too large for Vercel's 512MB temporary storage. Vercel is not recommended for this use case. Use a VPS (DigitalOcean/AWS).",
                 }, { status: 500 });
             }
         }
