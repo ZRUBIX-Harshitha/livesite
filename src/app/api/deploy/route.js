@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { execSync, spawn } from "child_process";
-import { existsSync, rmSync, mkdirSync, readFileSync } from "fs";
+import fs, { existsSync, rmSync, mkdirSync, readFileSync } from "fs";
 import path from "path";
 import os from "os";
 import net from "net";
+import AdmZip from "adm-zip";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -195,6 +196,72 @@ function waitForTunnelUrl(proc, timeoutMs = 120_000) {
     });
 }
 
+/**
+ * Download a GitHub repository as a ZIP file and extract it
+ */
+async function downloadGithubZip(repoUrl, targetDir) {
+    console.log(`[deploy] Downloading ZIP from GitHub: ${repoUrl}`);
+    
+    // Convert github.com/user/repo to codeload.github.com/user/repo/zip/refs/heads/main
+    // Handle both https://github.com/user/repo and repo.git 
+    const cleanUrl = repoUrl.replace(/\.git$/, "").replace(/\/$/, "");
+    const parts = cleanUrl.split("/");
+    const owner = parts[parts.length - 2];
+    const repo = parts[parts.length - 1];
+    
+    // Try main then master
+    const branches = ["main", "master"];
+    let lastError;
+
+    for (const branch of branches) {
+        try {
+            const zipUrl = `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${branch}`;
+            const response = await fetch(zipUrl);
+            
+            if (!response.ok) {
+                throw new Error(`GitHub returned ${response.status} for branch ${branch}`);
+            }
+
+            const buffer = await response.arrayBuffer();
+            const zip = new AdmZip(Buffer.from(buffer));
+            
+            // GitHub Zips have a root folder like "repo-main", we need to strip it
+            const zipEntries = zip.getEntries();
+            const rootFolder = zipEntries[0].entryName.split("/")[0];
+            
+            console.log(`[deploy] Extracting ZIP (root: ${rootFolder})...`);
+            zip.extractAllTo(targetDir, true);
+            
+            // Move contents from rootFolder to targetDir
+            const extractedPath = path.join(targetDir, rootFolder);
+            const files = fs.readdirSync(extractedPath);
+            
+            for (const file of files) {
+                const src = path.join(extractedPath, file);
+                const dest = path.join(targetDir, file);
+                if (fs.existsSync(dest)) {
+                    if (fs.lstatSync(dest).isDirectory()) {
+                        fs.rmSync(dest, { recursive: true, force: true });
+                    } else {
+                        fs.unlinkSync(dest);
+                    }
+                }
+                fs.renameSync(src, dest);
+            }
+            
+            // Cleanup empty root folder
+            fs.rmSync(extractedPath, { recursive: true, force: true });
+            
+            return true;
+        } catch (err) {
+            console.warn(`[deploy] Failed to fetch branch ${branch}:`, err.message);
+            lastError = err;
+        }
+    }
+    
+    throw new Error(`Could not download repository ZIP: ${lastError.message}`);
+}
+
 /* ───────────────────────────────────────────────────────────
    POST /api/deploy
 ─────────────────────────────────────────────────────────── */
@@ -219,21 +286,33 @@ export async function POST(request) {
         }
 
         // ── 1. Check prerequisites ──────────────────────────────
-        try { execSync("git --version", { stdio: "pipe" }); }
-        catch { return NextResponse.json({ error: "git is not installed or not in PATH." }, { status: 500 }); }
+        let hasGit = false;
+        try { 
+            execSync("git --version", { stdio: "pipe" }); 
+            hasGit = true;
+        } catch { 
+            console.warn("[deploy] git is not installed. Will fallback to ZIP download.");
+        }
 
-        // ── 2. Clone the repo ────────────────────────────────────
+        // ── 2. Clone/Fetch the repo ──────────────────────────────
         const tmpBase = path.join(os.tmpdir(), "livesite-deploys");
         if (!existsSync(tmpBase)) mkdirSync(tmpBase, { recursive: true });
 
         const repoName = repoUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(-30);
         const cloneDir = path.join(tmpBase, `${repoName}_${Date.now()}`);
+        if (!existsSync(cloneDir)) mkdirSync(cloneDir, { recursive: true });
 
         try {
-            run(`git clone --depth=1 "${repoUrl}" "${cloneDir}"`, tmpBase);
+            if (hasGit) {
+                console.log("[deploy] Cloning via Git...");
+                run(`git clone --depth=1 "${repoUrl}" "${cloneDir}"`, tmpBase);
+            } else {
+                await downloadGithubZip(repoUrl, cloneDir);
+            }
         } catch (err) {
+            console.error("[deploy] Clone/Download failed:", err);
             return NextResponse.json({
-                error: "Failed to clone repository. Make sure the URL is a valid public GitHub repo.",
+                error: "Failed to fetch repository code. Make sure the URL is a valid public GitHub repo.",
                 details: err.message,
             }, { status: 500 });
         }
