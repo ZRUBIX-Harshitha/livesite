@@ -308,7 +308,16 @@ export async function POST(request) {
 
         // ── 2. Clone/Fetch the repo ──────────────────────────────
         const tmpBase = path.join(os.tmpdir(), "livesite-deploys");
-        if (!existsSync(tmpBase)) mkdirSync(tmpBase, { recursive: true });
+        // Aggressively clean up previous deployments to free up space
+        if (existsSync(tmpBase)) {
+            console.log("[deploy] Cleaning up old deployment folders to free up space...");
+            try { 
+                fs.rmSync(tmpBase, { recursive: true, force: true });
+            } catch (e) {
+                console.warn("[deploy] Cleanup failed:", e.message);
+            }
+        }
+        mkdirSync(tmpBase, { recursive: true });
 
         const repoName = repoUrl.replace(/[^a-zA-Z0-9]/g, "_").slice(-30);
         const cloneDir = path.join(tmpBase, `${repoName}_${Date.now()}`);
@@ -334,13 +343,13 @@ export async function POST(request) {
 
         // ── 4. Install dependencies ──────────────────────────────
         if (existsSync(path.join(cloneDir, "package.json"))) {
-            console.log("[deploy] Installing dependencies...");
+            console.log("[deploy] Installing dependencies (minimal space)...");
             try {
-                const tmpCache = path.join(os.tmpdir(), ".npm-cache");
-                run(`npm install --no-audit --no-fund --legacy-peer-deps --loglevel=error --prefer-offline --cache="${tmpCache}"`, cloneDir);
+                // Use no-cache and no-package-lock to save space on Vercel's small disk
+                run(`npm install --no-audit --no-fund --legacy-peer-deps --loglevel=error --prefer-offline --no-cache --no-package-lock --omit=dev`, cloneDir);
             } catch (err) {
                 return NextResponse.json({
-                    error: "Dependency installation failed.",
+                    error: "Dependency installation failed (possibly out of space).",
                     details: err.message,
                 }, { status: 500 });
             }
