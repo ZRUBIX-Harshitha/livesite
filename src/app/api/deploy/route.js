@@ -133,11 +133,17 @@ function detectProject(dir) {
    Utility: run a shell command synchronously
 ─────────────────────────────────────────────────────────── */
 function run(cmd, cwd) {
+    const tmpCache = path.join(os.tmpdir(), ".npm-cache");
     execSync(cmd, {
         cwd,
         stdio: "pipe",
         timeout: 300_000, // 5 min max
-        env: { ...process.env, CI: "false" },
+        env: { 
+            ...process.env, 
+            CI: "false",
+            HOME: os.tmpdir(),
+            npm_config_cache: tmpCache,
+        },
     });
 }
 
@@ -145,10 +151,16 @@ function run(cmd, cwd) {
    Utility: start a process and return the child
 ─────────────────────────────────────────────────────────── */
 function spawnProcess(cmd, args, cwd, env = {}) {
+    const tmpCache = path.join(os.tmpdir(), ".npm-cache");
     return spawn(cmd, args, {
         cwd,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, ...env },
+        env: { 
+            ...process.env, 
+            ...env,
+            HOME: os.tmpdir(),
+            npm_config_cache: tmpCache,
+        },
         shell: true,
         detached: true, // Persist even if main process exits (on some OSes)
     });
@@ -324,7 +336,8 @@ export async function POST(request) {
         if (existsSync(path.join(cloneDir, "package.json"))) {
             console.log("[deploy] Installing dependencies...");
             try {
-                run("npm install --no-audit --no-fund --legacy-peer-deps --loglevel=error --prefer-offline", cloneDir);
+                const tmpCache = path.join(os.tmpdir(), ".npm-cache");
+                run(`npm install --no-audit --no-fund --legacy-peer-deps --loglevel=error --prefer-offline --cache="${tmpCache}"`, cloneDir);
             } catch (err) {
                 return NextResponse.json({
                     error: "Dependency installation failed.",
